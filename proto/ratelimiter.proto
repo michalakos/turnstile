@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package ratelimiter;
+
+option go_package = "github.com/michalakos/turnstile/gen/proto";
+
+service RateLimiter {
+  rpc CheckRateLimit(RateLimitRequest) returns (RateLimitResponse);
+}
+
+message RateLimitRequest {
+  string identifier = 1;
+  string action = 2;
+  int64 cost = 3;
+}
+
+message RateLimitResponse {
+  bool allowed = 1;
+  int64 remaining = 2;
+  int64 limit = 3;
+  int64 retry_after = 4;
+}
