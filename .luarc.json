@@ -1,0 +1,7 @@
+{
+    "diagnostics.globals": [
+        "KEYS",
+        "ARGV",
+        "redis"
+    ]
+}
