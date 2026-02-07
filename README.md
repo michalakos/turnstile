@@ -1,6 +1,6 @@
 # Turnstile
 
-High-performance distributed rate limiter build with Go, gRPC, and Redis.
+High-performance distributed rate limiter built with Go, gRPC, and Redis.
 
 ## Features
 
