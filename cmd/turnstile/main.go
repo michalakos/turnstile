@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/michalakos/turnstile/config"
 	pb "github.com/michalakos/turnstile/gen/proto"
 	"github.com/michalakos/turnstile/internal/ratelimiter"
 	"github.com/michalakos/turnstile/internal/server"
@@ -16,40 +17,40 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-const (
-	grpcPort   = ":50051"
-	maxTokens  = 10
-	refillRate = 1
-)
-
-func redisAddr() string {
-	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		return addr
+func configPath() string {
+	if p := os.Getenv("CONFIG_PATH"); p != "" {
+		return p
 	}
-	return "localhost:6379"
+	return "config/config.yaml"
 }
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	cfg, err := config.Load(configPath())
+	if err != nil {
+		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: redisAddr(),
-	})
-
-	cfg := ratelimiter.Config{
-		MaxTokens:  maxTokens,
-		RefillRate: refillRate,
+	redisAddr := cfg.Redis.Addr
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		redisAddr = addr
 	}
 
-	limiter := ratelimiter.New(redisClient, cfg, logger)
+	redisClient := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+
+	limiter := ratelimiter.New(redisClient, logger)
 	srv := server.New(limiter, cfg, logger)
 
-	listener, err := net.Listen("tcp", grpcPort)
+	listener, err := net.Listen("tcp", cfg.Server.Port)
 	if err != nil {
-		logger.Error("failed to listen", "port", grpcPort, "error", err)
+		logger.Error("failed to listen", "port", cfg.Server.Port, "error", err)
 		os.Exit(1)
 	}
 
@@ -57,7 +58,6 @@ func main() {
 	pb.RegisterRateLimiterServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 
-	// Shut down gracefully when the context is cancelled.
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutting down gracefully...")
@@ -67,7 +67,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("starting gRPC server", "port", grpcPort)
+	logger.Info("starting gRPC server", "port", cfg.Server.Port)
 	if err := grpcServer.Serve(listener); err != nil {
 		logger.Error("gRPC server failed", "error", err)
 		os.Exit(1)

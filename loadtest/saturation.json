@@ -1,0 +1,14 @@
+{
+  "proto": "proto/ratelimiter.proto",
+  "call": "ratelimiter.RateLimiter/CheckRateLimit",
+  "host": "localhost:50051",
+  "insecure": true,
+  "concurrency": 100,
+  "connections": 50,
+  "duration": "30s",
+  "data": {
+    "identifier": "loadtest-user",
+    "action": "api_call",
+    "cost": 1
+  }
+}

@@ -1,0 +1,17 @@
+server:
+  port: ":50051"
+
+redis:
+  addr: "localhost:6379"
+
+defaults:
+  max_tokens: 10
+  refill_rate: 1
+
+actions:
+  login:
+    max_tokens: 5
+    refill_rate: 1
+  api_call:
+    max_tokens: 100
+    refill_rate: 10

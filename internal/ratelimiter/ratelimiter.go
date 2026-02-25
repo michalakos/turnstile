@@ -15,12 +15,6 @@ import (
 //go:embed token_bucket.lua
 var luaScript string
 
-// Config holds the rate limiter settings.
-type Config struct {
-	MaxTokens  int64
-	RefillRate int64
-}
-
 // Result holds the output from a rate limit check.
 type Result struct {
 	Allowed    bool
@@ -31,25 +25,25 @@ type Result struct {
 
 // RateLimiter checks rate limits against Redis.
 type RateLimiter interface {
-	Check(ctx context.Context, key string, cost int64) (*Result, error)
+	Check(ctx context.Context, key string, cost, maxTokens, refillRate int64) (*Result, error)
 }
 
 // rateLimiter implements RateLimiter using Redis and the token bucket Lua script.
 type rateLimiter struct {
 	client    *redis.Client
 	scriptSHA string
-	config    Config
 	logger    *slog.Logger
+	now       func() int64
 }
 
 // New creates a RateLimiter and preloads the Lua script into Redis.
 // If the preload fails (e.g., Redis is down), the limiter still works
 // by falling back to EVAL at runtime.
-func New(client *redis.Client, cfg Config, logger *slog.Logger) RateLimiter {
+func New(client *redis.Client, logger *slog.Logger) RateLimiter {
 	rl := &rateLimiter{
 		client: client,
-		config: cfg,
 		logger: logger,
+		now:    func() int64 { return time.Now().Unix() },
 	}
 
 	// Preload the Lua script to get its SHA hash for EVALSHA.
@@ -68,10 +62,10 @@ func New(client *redis.Client, cfg Config, logger *slog.Logger) RateLimiter {
 
 // Check executes the rate limit check for the given key and cost.
 // It tries EVALSHA first, falls back to EVAL, and fails open on Redis errors.
-func (rl *rateLimiter) Check(ctx context.Context, key string, cost int64) (*Result, error) {
-	now := time.Now().Unix()
+func (rl *rateLimiter) Check(ctx context.Context, key string, cost, maxTokens, refillRate int64) (*Result, error) {
+	now := rl.now()
 	keys := []string{key}
-	args := []any{rl.config.MaxTokens, rl.config.RefillRate, cost, now}
+	args := []any{maxTokens, refillRate, cost, now}
 
 	var raw any
 	var err error
@@ -94,8 +88,8 @@ func (rl *rateLimiter) Check(ctx context.Context, key string, cost int64) (*Resu
 		rl.logger.Error("redis error, failing open", "error", err, "key", key)
 		return &Result{
 			Allowed:   true,
-			Remaining: rl.config.MaxTokens,
-			Limit:     rl.config.MaxTokens,
+			Remaining: maxTokens,
+			Limit:     maxTokens,
 		}, nil
 	}
 
