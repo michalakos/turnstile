@@ -15,10 +15,11 @@ according to system demand.
 - Single Redis instance
 - Docker Compose deployment
 - Hardcoded service endpoint
+- Per-request structured logging (action, outcome, latency, gRPC status code)
 
 ### Out of Scope (Future Consideration)
 
-- Observability (metrics, tracing)
+- Metrics and distributed tracing
 - Health check endpoints
 - Redis clustering/replication
 - Service discovery
@@ -60,6 +61,10 @@ according to system demand.
 
 - **Rate Limiter Service (Go):** Receives gRPC requests, executes the rate limit
 algorithm via Redis Lua scripts, and returns allow/deny decisions.
+- **Logging Interceptor:** gRPC unary interceptor that wraps every request,
+emitting a structured log line with action, outcome (`allowed`/denied/error),
+latency, and gRPC status code. Runs at `Debug` level for allowed requests,
+`Info` for denied, and `Error` for failures.
 - **Redis:** Holds the state of the system and uses atomic operations
 via Lua scripts to avoid race conditions.
 - **nginx Load Balancer:** Distributes traffic to all instances of the rate
@@ -72,46 +77,69 @@ limiter, uniting them under a single endpoint.
 
 1. Client sends gRPC request including an identifier and the action requested
 2. nginx selects a Turnstile instance and forwards the request
-3. Turnstile sends a Lua script to Redis containing the rate limit algorithm
-4. Redis executes the Lua script atomically - checking available tokens,
-decrementing if allowed, and returning the result.
-5. Turnstile returns a response containing: allow/deny decision,
+3. The logging interceptor records the start time and extracts the action
+4. Turnstile sends a Lua script to Redis containing the rate limit algorithm
+5. Redis executes the Lua script atomically — checking available tokens,
+decrementing if allowed, and returning the result
+6. The logging interceptor emits a structured log line with action, outcome,
+latency, and gRPC status code, then returns the response
+7. Turnstile returns a response containing: allow/deny decision,
 remaining tokens, and (if denied) a retry-after duration indicating when
 tokens will be available
-6. The client service processes the response - proceeding with the request
-on allow, or returning an error to the user on deny (optionally including
-retry-after information)
+8. The client service processes the response — proceeding on allow,
+or returning an error to the user on deny
 
 ### Sequence Diagram
 
 ```text
-┌────────┐          ┌───────┐          ┌───────────┐          ┌───────┐
-│ Client │          │ nginx │          │ Turnstile │          │ Redis │
-└───┬────┘          └───┬───┘          └─────┬─────┘          └───┬───┘
-    │                   │                    │                    │
-    │  CheckRateLimit   │                    │                    │
-    │  (identifier,     │                    │                    │
-    │   action)         │                    │                    │
-    │──────────────────>│                    │                    │
-    │                   │                    │                    │
-    │                   │  forward request   │                    │
-    │                   │───────────────────>│                    │
-    │                   │                    │                    │
-    │                   │                    │  EVALSHA (Lua)     │
-    │                   │                    │───────────────────>│
-    │                   │                    │                    │
-    │                   │                    │  {allowed, tokens, │
-    │                   │                    │   retry_after}     │
-    │                   │                    │<───────────────────│
-    │                   │                    │                    │
-    │                   │  {allowed, tokens, │                    │
-    │                   │   retry_after}     │                    │
-    │                   │<───────────────────│                    │
-    │                   │                    │                    │
-    │  {allowed, tokens,│                    │                    │
-    │   retry_after}    │                    │                    │
-    │<──────────────────│                    │                    │
-    │                   │                    │                    │
+┌────────┐    ┌───────┐    ┌─────────────┐    ┌───────────┐    ┌───────┐
+│ Client │    │ nginx │    │  Logging    │    │ Turnstile │    │ Redis │
+│        │    │       │    │ Interceptor │    │  Handler  │    │       │
+└───┬────┘    └───┬───┘    └──────┬──────┘    └─────┬─────┘    └───┬───┘
+    │             │               │                  │              │
+    │ CheckRate   │               │                  │              │
+    │ Limit       │               │                  │              │
+    │────────────>│               │                  │              │
+    │             │               │                  │              │
+    │             │ forward       │                  │              │
+    │             │──────────────>│                  │              │
+    │             │               │ record start     │              │
+    │             │               │──────┐           │              │
+    │             │               │      │           │              │
+    │             │               │<─────┘           │              │
+    │             │               │                  │              │
+    │             │               │ invoke handler   │              │
+    │             │               │─────────────────>│              │
+    │             │               │                  │ EVALSHA(Lua) │
+    │             │               │                  │─────────────>│
+    │             │               │                  │              │
+    │             │               │                  │ {allowed,    │
+    │             │               │                  │  tokens,     │
+    │             │               │                  │  retry_after}│
+    │             │               │                  │<─────────────│
+    │             │               │                  │              │
+    │             │               │ response + nil   │              │
+    │             │               │<─────────────────│              │
+    │             │               │                  │              │
+    │             │               │ log(action,      │              │
+    │             │               │     allowed,     │              │
+    │             │               │     latency,     │              │
+    │             │               │     grpc_code)   │              │
+    │             │               │──────┐           │              │
+    │             │               │      │           │              │
+    │             │               │<─────┘           │              │
+    │             │               │                  │              │
+    │             │ {allowed,     │                  │              │
+    │             │  tokens,      │                  │              │
+    │             │  retry_after} │                  │              │
+    │             │<──────────────│                  │              │
+    │             │               │                  │              │
+    │ {allowed,   │               │                  │              │
+    │  tokens,    │               │                  │              │
+    │  retry_     │               │                  │              │
+    │  after}     │               │                  │              │
+    │<────────────│               │                  │              │
+    │             │               │                  │              │
 ```
 
 ## Technology Choices

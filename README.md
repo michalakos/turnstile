@@ -88,6 +88,21 @@ Rate limit keys are scoped as `identifier:action`, so each (identifier, action) 
 
 On Redis failure the service fails open: all requests are allowed and the error is logged.
 
+## Observability
+
+Every request produces a structured log line via the gRPC logging interceptor:
+
+| Field | Description |
+|---|---|
+| `method` | Full gRPC method name (e.g. `/ratelimiter.RateLimiter/CheckRateLimit`) |
+| `action` | Action from the request |
+| `allowed` | Whether the request was permitted (absent on errors) |
+| `duration` | Request latency |
+| `grpc_code` | gRPC status code string (e.g. `OK`, `INVALID_ARGUMENT`) |
+| `error` | Error detail (only on non-OK responses) |
+
+Log level by outcome: `Debug` for allowed (quiet in production), `Info` for denied (operationally interesting), `Error` for unexpected failures. Control verbosity by setting the log level — no code changes required.
+
 ## Running Tests
 
 Unit tests (no external dependencies):

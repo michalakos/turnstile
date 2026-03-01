@@ -10,6 +10,7 @@ import (
 
 	"github.com/michalakos/turnstile/config"
 	pb "github.com/michalakos/turnstile/gen/proto"
+	"github.com/michalakos/turnstile/internal/interceptors"
 	"github.com/michalakos/turnstile/internal/ratelimiter"
 	"github.com/michalakos/turnstile/internal/server"
 	"github.com/redis/go-redis/v9"
@@ -54,7 +55,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			interceptors.LoggingInterceptor(logger),
+			// metrics interceptor added in step 2
+		),
+	)
 	pb.RegisterRateLimiterServer(grpcServer, srv)
 	reflection.Register(grpcServer)
 
