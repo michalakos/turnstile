@@ -9,21 +9,23 @@ according to system demand.
 
 ## Scope
 
-### Phase 1 (Current)
+### Current
 
 - Core rate limiting service with token bucket algorithm
 - Single Redis instance
 - Docker Compose deployment
-- Hardcoded service endpoint
 - Per-request structured logging (action, outcome, latency, gRPC status code)
+- Configurable log level and format (text/JSON)
+- Prometheus metrics (RPS, latency histogram, inflight, Redis errors)
+- Health check endpoints (liveness, readiness)
+- Grafana dashboard with pre-provisioned datasource and panels
 
 ### Out of Scope (Future Consideration)
 
-- Metrics and distributed tracing
-- Health check endpoints
 - Redis clustering/replication
 - Service discovery
 - Additional algorithms (sliding window)
+- Distributed tracing
 
 ## System Components
 
@@ -46,15 +48,22 @@ according to system demand.
      ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
      │   Turnstile 1   │   │   Turnstile 2   │   │   Turnstile N   │
      │      (Go)       │   │      (Go)       │   │      (Go)       │
-     └────────┬────────┘   └────────┬────────┘   └────────┬────────┘
-              │                     │                     │
-              └─────────────────────┼─────────────────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │       Redis         │
-                         │  (Shared State)     │
-                         └─────────────────────┘
+     │  :9091 HTTP     │   │  :9091 HTTP     │   │  :9091 HTTP     │
+     └───┬─────────────┘   └───┬─────────────┘   └───┬─────────────┘
+         │     │               │     │               │     │
+         │     └───────────────┴─────┴───────────────┘     │
+         │                     │ scrape /metrics            │
+         ▼                     ▼                            │
+┌─────────────────┐   ┌─────────────────┐                  │
+│      Redis      │   │   Prometheus    │                  │
+│  (Shared State) │   │   :9090         │──────────────────┘
+└─────────────────┘   └────────┬────────┘
+                               │
+                               ▼
+                      ┌─────────────────┐
+                      │    Grafana      │
+                      │    :3000        │
+                      └─────────────────┘
 ```
 
 ### Components
@@ -62,14 +71,23 @@ according to system demand.
 - **Rate Limiter Service (Go):** Receives gRPC requests, executes the rate limit
 algorithm via Redis Lua scripts, and returns allow/deny decisions.
 - **Logging Interceptor:** gRPC unary interceptor that wraps every request,
-emitting a structured log line with action, outcome (`allowed`/denied/error),
+emitting a structured log line with action, outcome (`allowed`/`denied`/`error`),
 latency, and gRPC status code. Runs at `Debug` level for allowed requests,
-`Info` for denied, and `Error` for failures.
+`Info` for denied, and `Error` for failures. Level and format are driven by config.
+- **Metrics Interceptor:** gRPC unary interceptor that tracks inflight request
+count, request duration, and result label (`allowed`/`denied`/`error`) using a
+dedicated Prometheus registry.
+- **HTTP Observability Server:** A lightweight `http.Server` running alongside
+the gRPC server on `observability.metrics_port`. Serves `/metrics` (Prometheus
+scrape endpoint), `/health/live`, and `/health/ready`.
 - **Redis:** Holds the state of the system and uses atomic operations
 via Lua scripts to avoid race conditions.
 - **nginx Load Balancer:** Distributes traffic to all instances of the rate
 limiter, uniting them under a single endpoint.
-- **Configuration:** Rate limits, Redis connection, Service settings.
+- **Prometheus:** Scrapes metrics from all turnstile instances every 15s.
+- **Grafana:** Pre-provisioned dashboard displaying RPS by result, latency
+percentiles, Redis error rate, and inflight requests.
+- **Configuration:** Rate limits, Redis connection, logging, observability settings.
 
 ## Request Flow
 
@@ -77,69 +95,77 @@ limiter, uniting them under a single endpoint.
 
 1. Client sends gRPC request including an identifier and the action requested
 2. nginx selects a Turnstile instance and forwards the request
-3. The logging interceptor records the start time and extracts the action
-4. Turnstile sends a Lua script to Redis containing the rate limit algorithm
-5. Redis executes the Lua script atomically — checking available tokens,
+3. The metrics interceptor increments the inflight gauge and records the start time
+4. The logging interceptor records the start time and extracts the action
+5. Turnstile sends a Lua script to Redis containing the rate limit algorithm
+6. Redis executes the Lua script atomically — checking available tokens,
 decrementing if allowed, and returning the result
-6. The logging interceptor emits a structured log line with action, outcome,
+7. The logging interceptor emits a structured log line with action, outcome,
 latency, and gRPC status code, then returns the response
-7. Turnstile returns a response containing: allow/deny decision,
+8. The metrics interceptor decrements the inflight gauge and records the request
+duration and result label
+9. Turnstile returns a response containing: allow/deny decision,
 remaining tokens, and (if denied) a retry-after duration indicating when
 tokens will be available
-8. The client service processes the response — proceeding on allow,
+10. The client service processes the response — proceeding on allow,
 or returning an error to the user on deny
 
 ### Sequence Diagram
 
 ```text
-┌────────┐    ┌───────┐    ┌─────────────┐    ┌───────────┐    ┌───────┐
-│ Client │    │ nginx │    │  Logging    │    │ Turnstile │    │ Redis │
-│        │    │       │    │ Interceptor │    │  Handler  │    │       │
-└───┬────┘    └───┬───┘    └──────┬──────┘    └─────┬─────┘    └───┬───┘
-    │             │               │                  │              │
-    │ CheckRate   │               │                  │              │
-    │ Limit       │               │                  │              │
-    │────────────>│               │                  │              │
-    │             │               │                  │              │
-    │             │ forward       │                  │              │
-    │             │──────────────>│                  │              │
-    │             │               │ record start     │              │
-    │             │               │──────┐           │              │
-    │             │               │      │           │              │
-    │             │               │<─────┘           │              │
-    │             │               │                  │              │
-    │             │               │ invoke handler   │              │
-    │             │               │─────────────────>│              │
-    │             │               │                  │ EVALSHA(Lua) │
-    │             │               │                  │─────────────>│
-    │             │               │                  │              │
-    │             │               │                  │ {allowed,    │
-    │             │               │                  │  tokens,     │
-    │             │               │                  │  retry_after}│
-    │             │               │                  │<─────────────│
-    │             │               │                  │              │
-    │             │               │ response + nil   │              │
-    │             │               │<─────────────────│              │
-    │             │               │                  │              │
-    │             │               │ log(action,      │              │
-    │             │               │     allowed,     │              │
-    │             │               │     latency,     │              │
-    │             │               │     grpc_code)   │              │
-    │             │               │──────┐           │              │
-    │             │               │      │           │              │
-    │             │               │<─────┘           │              │
-    │             │               │                  │              │
-    │             │ {allowed,     │                  │              │
-    │             │  tokens,      │                  │              │
-    │             │  retry_after} │                  │              │
-    │             │<──────────────│                  │              │
-    │             │               │                  │              │
-    │ {allowed,   │               │                  │              │
-    │  tokens,    │               │                  │              │
-    │  retry_     │               │                  │              │
-    │  after}     │               │                  │              │
-    │<────────────│               │                  │              │
-    │             │               │                  │              │
+┌────────┐  ┌───────┐  ┌─────────┐  ┌─────────┐  ┌───────────┐  ┌───────┐
+│ Client │  │ nginx │  │ Metrics │  │ Logging │  │ Turnstile │  │ Redis │
+│        │  │       │  │Intercpt.│  │Intercpt.│  │  Handler  │  │       │
+└───┬────┘  └───┬───┘  └────┬────┘  └────┬────┘  └─────┬─────┘  └───┬───┘
+    │            │           │            │              │             │
+    │CheckRate   │           │            │              │             │
+    │Limit       │           │            │              │             │
+    │───────────>│           │            │              │             │
+    │            │           │            │              │             │
+    │            │ forward   │            │              │             │
+    │            │──────────>│            │              │             │
+    │            │           │inflight++  │              │             │
+    │            │           │record start│              │             │
+    │            │           │──────────>│              │              │
+    │            │           │           │ record start  │             │
+    │            │           │           │──────┐        │             │
+    │            │           │           │      │        │             │
+    │            │           │           │<─────┘        │             │
+    │            │           │           │               │             │
+    │            │           │           │ invoke handler│             │
+    │            │           │           │──────────────>│             │
+    │            │           │           │               │ EVALSHA(Lua)│
+    │            │           │           │               │────────────>│
+    │            │           │           │               │             │
+    │            │           │           │               │ {allowed,   │
+    │            │           │           │               │  tokens,    │
+    │            │           │           │               │  retry_after│
+    │            │           │           │               │<────────────│
+    │            │           │           │               │             │
+    │            │           │           │ response+nil  │             │
+    │            │           │           │<──────────────│             │
+    │            │           │           │               │             │
+    │            │           │           │ log(action,   │             │
+    │            │           │           │  allowed,     │             │
+    │            │           │           │  latency,     │             │
+    │            │           │           │  grpc_code)   │             │
+    │            │           │           │──────┐        │             │
+    │            │           │           │      │        │             │
+    │            │           │           │<─────┘        │             │
+    │            │           │           │               │             │
+    │            │           │<──────────│               │             │
+    │            │           │inflight-- │               │             │
+    │            │           │record(    │               │             │
+    │            │           │ duration, │               │             │
+    │            │           │ result)   │               │             │
+    │            │           │──────┐    │               │             │
+    │            │           │      │    │               │             │
+    │            │           │<─────┘    │               │             │
+    │            │           │           │               │             │
+    │            │<──────────│           │               │             │
+    │            │           │           │               │             │
+    │<───────────│           │           │               │             │
+    │            │           │           │               │             │
 ```
 
 ## Technology Choices
@@ -180,7 +206,8 @@ happens as a single uninterruptible operation, eliminating race conditions.
 When Redis is unavailable, Turnstile fails open - allowing all requests rather
 than blocking them. Rate limiting is a protective layer, not core functionality;
 temporary loss of rate limiting is preferable to total service disruption.
-This tradeoff prioritizes availability over strict enforcement.
+This tradeoff prioritizes availability over strict enforcement. Redis failures
+are counted in `turnstile_redis_errors_total` so the fail-open rate is visible.
 
 ### Horizontal Scaling
 
@@ -188,3 +215,10 @@ Turnstile instances are stateless - all rate limit state lives in the shared
 Redis instance. This allows horizontal scaling by simply adding more instances
 behind nginx; they don't need to coordinate with each other since they all
 read and write to the same Redis store.
+
+### Dedicated Prometheus Registry
+
+Each instance uses a private `prometheus.Registry` rather than the global one.
+This keeps the `/metrics` endpoint scoped to application metrics only, omitting
+Go runtime and process metrics that would otherwise be included by default. It
+also makes the metrics package independently testable without global state.

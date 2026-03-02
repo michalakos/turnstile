@@ -10,13 +10,13 @@ client
   ▼
 nginx (port 50051)
   │  round-robin gRPC load balancing
-  ├──▶ turnstile instance 1
-  ├──▶ turnstile instance 2
-  └──▶ turnstile instance 3
-              │
-              ▼
-           Redis
-      (token bucket state)
+  ├──▶ turnstile instance 1  ──▶ :9091 (metrics, health)
+  ├──▶ turnstile instance 2  ──▶ :9092 (metrics, health)
+  └──▶ turnstile instance 3  ──▶ :9093 (metrics, health)
+              │                        │
+              ▼                        ▼
+           Redis                  Prometheus ──▶ Grafana
+      (token bucket state)        (scrapes all instances)
 ```
 
 Each turnstile instance is stateless. All rate limit state lives in Redis. The Lua script runs atomically, so concurrent requests from different instances against the same key are safe.
@@ -32,9 +32,16 @@ server:
 redis:
   addr: "localhost:6379"  # default; overridden by REDIS_ADDR env var
 
+logging:
+  level: info          # debug|info|warn|error
+  format: text         # text|json
+
+observability:
+  metrics_port: ":9091"  # HTTP server for /metrics and /health/*
+
 defaults:              # fallback limits for unknown actions
   max_tokens: 10
-  refill_rate: 1       # tokens per second (int64; fractional rates not supported in v1)
+  refill_rate: 1       # tokens per second (int64; fractional rates not supported)
 
 actions:               # per-action overrides
   login:
@@ -53,7 +60,7 @@ The config file path defaults to `config/config.yaml` and can be overridden with
 docker compose up --build
 ```
 
-This starts Redis, 3 turnstile instances, and nginx on port 50051.
+This starts Redis, 3 turnstile instances, nginx on port 50051, Prometheus on port 9090, and Grafana on port 3000.
 
 Test with grpcurl:
 
@@ -86,9 +93,11 @@ Send 6 requests with `action: login` (max_tokens: 5) — the 6th returns `allowe
 
 Rate limit keys are scoped as `identifier:action`, so each (identifier, action) pair has an independent bucket.
 
-On Redis failure the service fails open: all requests are allowed and the error is logged.
+On Redis failure the service fails open: all requests are allowed and the error is logged and counted.
 
 ## Observability
+
+### Logging
 
 Every request produces a structured log line via the gRPC logging interceptor:
 
@@ -101,7 +110,42 @@ Every request produces a structured log line via the gRPC logging interceptor:
 | `grpc_code` | gRPC status code string (e.g. `OK`, `INVALID_ARGUMENT`) |
 | `error` | Error detail (only on non-OK responses) |
 
-Log level by outcome: `Debug` for allowed (quiet in production), `Info` for denied (operationally interesting), `Error` for unexpected failures. Control verbosity by setting the log level — no code changes required.
+Log level by outcome: `Debug` for allowed (quiet in production), `Info` for denied, `Error` for unexpected failures. Log level and format are set in config.
+
+### Metrics
+
+Each instance exposes Prometheus metrics on its `observability.metrics_port`:
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `turnstile_requests_total` | Counter | `action`, `result` | Total requests by action and outcome (`allowed`\|`denied`\|`error`) |
+| `turnstile_request_duration_seconds` | Histogram | `action` | Request latency distribution |
+| `turnstile_inflight_requests` | Gauge | — | Requests currently in flight |
+| `turnstile_redis_errors_total` | Counter | — | Redis failures (fail-open events) |
+
+```bash
+curl http://localhost:9091/metrics | grep turnstile_
+```
+
+### Health Checks
+
+| Endpoint | Description |
+|---|---|
+| `GET /health/live` | Always returns 200. Signals the process is running. |
+| `GET /health/ready` | Returns 200 if Redis is reachable, 503 otherwise. |
+
+```bash
+curl http://localhost:9091/health/live
+curl http://localhost:9091/health/ready
+```
+
+### Grafana
+
+A pre-provisioned dashboard is available at `http://localhost:3000` (no login required). It includes panels for RPS by result, p50/p95/p99 latency, Redis error rate, and inflight requests.
+
+```bash
+make grafana   # opens http://localhost:3000
+```
 
 ## Running Tests
 
@@ -176,4 +220,4 @@ Measured on a MacBook Air M4, local 3-instance Docker Compose setup (nginx + 3 t
 
 - The nginx upstream uses Docker's internal DNS, which resolves all replicas automatically. Increasing `replicas` in `docker-compose.yml` requires no nginx config changes.
 - Redis is the single point of coordination. For high availability, replace the single Redis instance with Redis Cluster or a sentinel setup.
-- `refill_rate` is `int64` (tokens per second). Fractional rates (e.g. one token every 2 seconds) are not supported in v1 — the Lua script uses integer math.
+- `refill_rate` is `int64` (tokens per second). Fractional rates (e.g. one token every 2 seconds) are not supported — the Lua script uses integer math.

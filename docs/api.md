@@ -83,7 +83,7 @@ grpcurl -plaintext \
 }
 ```
 
-## Error Codes
+## gRPC Error Codes
 
 A rate limit denial is not an error - it is a valid response
 indicating the request should not proceed. Error codes are
@@ -92,5 +92,52 @@ reserved for actual problems.
 | Code               | When                                       |
 |--------------------|--------------------------------------------|
 | `OK`               | Request processed (check `allowed` field)  |
-| `INVALID_ARGUMENT` | Empty identifier, empty action, cost < 1   |
+| `INVALID_ARGUMENT` | Empty identifier, empty action, cost < 1, cost > max_tokens |
 | `INTERNAL`         | Lua script error, unexpected Redis failure |
+
+---
+
+## HTTP API
+
+Each turnstile instance exposes an HTTP server on `observability.metrics_port`
+(default `:9091`). In the Docker Compose setup, the three instances are mapped
+to host ports 9091–9093.
+
+### GET /metrics
+
+Returns Prometheus metrics in the standard text exposition format.
+Scraped automatically by Prometheus; can also be inspected manually.
+
+```bash
+curl http://localhost:9091/metrics
+```
+
+**Metrics exposed:**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `turnstile_requests_total` | Counter | `action`, `result` | Total requests by action and outcome (`allowed`\|`denied`\|`error`) |
+| `turnstile_request_duration_seconds` | Histogram | `action` | Request latency distribution |
+| `turnstile_inflight_requests` | Gauge | — | Requests currently in flight |
+| `turnstile_redis_errors_total` | Counter | — | Redis failures (fail-open events) |
+
+### GET /health/live
+
+Liveness probe. Always returns `200 OK` as long as the process is running.
+Use this for container restart policies.
+
+```bash
+curl -i http://localhost:9091/health/live
+# HTTP/1.1 200 OK
+```
+
+### GET /health/ready
+
+Readiness probe. Returns `200 OK` when Redis is reachable, `503 Service Unavailable` otherwise.
+Use this to gate traffic — a failing readiness check means the instance cannot serve requests reliably.
+
+```bash
+curl -i http://localhost:9091/health/ready
+# HTTP/1.1 200 OK       (Redis up)
+# HTTP/1.1 503 ...      (Redis down)
+```
