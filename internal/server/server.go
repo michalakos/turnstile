@@ -7,6 +7,7 @@ import (
 
 	"github.com/michalakos/turnstile/config"
 	pb "github.com/michalakos/turnstile/gen/proto"
+	"github.com/michalakos/turnstile/internal/metrics"
 	"github.com/michalakos/turnstile/internal/ratelimiter"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,14 +19,16 @@ type Server struct {
 	limiter   ratelimiter.RateLimiter
 	appConfig *config.Config
 	logger    *slog.Logger
+	metrics   *metrics.Metrics
 }
 
-// New creates a Server with the given rate limiter, config, and logger.
-func New(limiter ratelimiter.RateLimiter, cfg *config.Config, logger *slog.Logger) *Server {
+// New creates a Server with the given rate limiter, config, logger, and metrics.
+func New(limiter ratelimiter.RateLimiter, cfg *config.Config, logger *slog.Logger, m *metrics.Metrics) *Server {
 	return &Server{
 		limiter:   limiter,
 		appConfig: cfg,
 		logger:    logger,
+		metrics:   m,
 	}
 }
 
@@ -57,6 +60,9 @@ func (s *Server) CheckRateLimit(ctx context.Context, req *pb.RateLimitRequest) (
 	result, err := s.limiter.Check(ctx, key, cost, rule.MaxTokens, rule.RefillRate)
 	if err != nil {
 		s.logger.Error("rate limiter check failed", "error", err, "key", key)
+		if s.metrics != nil {
+			s.metrics.RecordRedisError()
+		}
 		return nil, status.Error(codes.Internal, "internal rate limiter error")
 	}
 

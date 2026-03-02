@@ -1,0 +1,64 @@
+{
+  "title": "Turnstile",
+  "uid": "turnstile",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "RPS by result",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(turnstile_requests_total[1m]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Request latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(turnstile_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(turnstile_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(turnstile_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Redis error rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(turnstile_redis_errors_total[1m])",
+          "legendFormat": "redis errors/s"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Inflight requests",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(turnstile_inflight_requests)",
+          "legendFormat": "inflight"
+        }
+      ]
+    }
+  ]
+}

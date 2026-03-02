@@ -48,7 +48,7 @@ func allowedResult() *ratelimiter.Result {
 
 func newServer(ml *mockLimiter) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(ml, testConfig(), logger)
+	return New(ml, testConfig(), logger, nil)
 }
 
 func TestMissingIdentifier(t *testing.T) {

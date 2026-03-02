@@ -4,6 +4,13 @@ server:
 redis:
   addr: "localhost:6379"
 
+logging:
+  level: info
+  format: text
+
+observability:
+  metrics_port: ":9091"
+
 defaults:
   max_tokens: 10
   refill_rate: 1

@@ -17,4 +17,7 @@ loadtest-saturation:
 	mkdir -p loadtest/results
 	ghz --config loadtest/saturation.json --output loadtest/results/saturation.json
 
-.PHONY: proto test test-integration loadtest-baseline loadtest-saturation
+grafana:
+	open http://localhost:3000
+
+.PHONY: proto test test-integration loadtest-baseline loadtest-saturation grafana
